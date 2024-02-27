@@ -2,125 +2,260 @@
 
 namespace App\Controllers;
 
+use App\Core\DB;
 use App\Models\User;
-use Random\RandomException;
-
-require './vendor/phpmailer/phpmailer/src/PHPMailer.php';
-require './vendor/phpmailer/phpmailer/src/Exception.php';
-require './vendor/phpmailer/phpmailer/src/SMTP.php';
-
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 use PHPMailer\PHPMailer\SMTP;
 
-
 class Security
 {
-    private User $User;
+    private DB $db;
 
-    public function __construct(){
-        $this->User = new User();
-
+    public function __construct()
+    {
+        $this->db = DB::getInstance();
         define('BASE_DIR', __DIR__ . '/..'); //pour le dossier parent
     }
 
     public function login(): void
     {
-        // Vérifie si le formulaire a été envoyé
-        if ($_SERVER["REQUEST_METHOD"] == "POST") {
-            // Récupère les données du formulaire de connexion
-            $email = $_POST["email"] ?? '';
-            $password = $_POST["password"] ?? '';
+        // Check if the form was submitted and the request method is POST
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             session_start();
-            // Vérifie l'authentification
-            if ($this->User->authenticateUser($email, $password)) {
-                if($this->User->is_Validated($email)){
-                    $_SESSION["connected"] = true;
-                    $_SESSION["user_email"] = $email;
-                    header("Location: /config");
-                    exit();
-                }
-                else{
+            // Retrieve username and password from request data
+            $email = $_POST['email'] ?? '';
+            $password = $_POST['password'] ?? '';
+
+            // check is email exist + get his information
+            $userData = $this->db->getOneBy("users", ['email' => $email]);
+
+            // Verify password if user is found
+            if ($userData && password_verify($password, $userData['password'])) {
+                $user = new User(
+                    $userData['id'],
+                    $userData['firstname'],
+                    $userData['lastname'],
+                    $userData['username'],
+                    $userData['email'],
+                    $userData['password'],
+                    $userData['role'],
+                    $userData['is_validated'],
+                    $userData['is_deleted'],
+                    new \DateTime($userData['created_at']),
+                    $userData['activation_token']
+                );
+                if (!$user->isValidated()) {
+                    // Account not activated
                     $_SESSION["error_message"] = "Compte non activé";
-                    header("Location: /Login");
+                    header("Location: /login");
+                    exit();
+                } else {
+
+                    // Store user information in session
+                    $_SESSION['email'] = $user->getEmail();
+
+                    // Redirect to home page
+                    header("Location: /home");
+                    exit;
                 }
             } else {
+                // Authentication failed
+                // Return error response
                 $_SESSION["error_message"] = "Email ou mot de passe incorrect !";
-                header("Location: /Login" );
+                header("Location: /login");
+                exit;
             }
-            exit();
+        } else {
+            // Display login form
+            require(BASE_DIR . "/Views/Security/login_form.php");
         }
-        // Ne pas afficher de contenu HTML ou de texte avant header()
-        require(BASE_DIR . "/Views/Security/login_form.php");
     }
 
     public function logout(): void
     {
         session_start();
 
-        //pour effacer les données de la session
+        // erase all the $_SESSION data
         $_SESSION = array();
 
         session_destroy();
 
-        // Redirige l'utilisateur vers la page de connexion
+        // Redirection to login page
         header("Location: /login");
-        exit();
     }
 
-    /**
-     * @throws RandomException
-     */
     public function register(): void
     {
-        // Vérifie si le formulaire a été envoyé
         if ($_SERVER["REQUEST_METHOD"] == "POST") {
-            // Récupère les données
+            // Récupère les données du formulaire
             $firstname = $_POST["firstname"] ?? '';
             $lastname = $_POST["lastname"] ?? '';
+            $username = $_POST["username"] ?? '';
             $email = $_POST["email"] ?? '';
             $password = $_POST["password"] ?? '';
 
-            $role = 'user'; //à changer
-
+            // Hashage du mot de passe
             $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
-            // Génère un token unique pour l'activation de compte
+            // Génère un token unique pour l'activation du compte
             $activationToken = bin2hex(random_bytes(16));
 
-            // Ajoute l'utilisateur en base de données avec le token
-            if ($this->User->createUser($firstname, $lastname, $email, $hashedPassword, $role, $activationToken)) {
-                // Envoie l'email d'activation
+            // Vérifie si l'email existe déjà
+            $EmailVerificator = $this->db->getOneBy("users", ['email' => $email]);
+
+            if ($EmailVerificator != null) {
+                // L'utilisateur existe déjà
+                session_start();
+                $_SESSION["error_message"] = "Cet email est déjà pris !";
+                require(BASE_DIR . "/Views/Security/register_form.php");
+                exit;
+            }
+
+            // Préparation des données pour l'insertion
+            $userData = [
+                'firstname' => $firstname,
+                'lastname' => $lastname,
+                'username' => $username,
+                'email' => $email,
+                'password' => $hashedPassword,
+                'activation_token' => $activationToken,
+                'is_validated' => false, // Par défaut, le compte n'est pas validé
+                'is_deleted' => false, // Par défaut, le compte n'est pas supprimé
+            ];
+
+            // Insertion de l'utilisateur dans la base de données
+            if ($this->db->insert("users", $userData)) {
                 $mail = new PHPMailer(true);
                 try {
                     // Paramètres du serveur
                     $this->ConfigMail($mail, $email);
-                    $mail->Subject = 'Activation de votre compte - Challenge Stack';
+                    $mail->Subject = 'Activation de votre compte - Simplify';
                     $mail->Body = 'Veuillez cliquer sur ce lien pour activer votre compte : <a href="localhost/activate?token=' . $activationToken . '">Activer mon compte</a>';
-
                     $mail->send();
+
                     header("Location: /login");
                 } catch (Exception $e) {
                     $_SESSION["error_message"] = "Impossible d'envoyer le mail d'activation.";
                 }
             } else {
                 $_SESSION["error_message"] = "Une erreur s'est produite lors de l'inscription.";
+                header("Location: /register");
+                exit;
+            }
+        } else {
+            require(BASE_DIR . "/Views/Security/register_form.php");
+        }
+    }
+
+    public function forgotPWD(): void
+    {
+        session_start();
+
+        if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST["email"])) {
+            $email = $_POST['email'];
+
+            if ($this->db->getOneBy("users", ['email' => $email])) {
+                // generate a random password
+                $newPassword = bin2hex(random_bytes(8));
+                $hashedPassword = password_hash($newPassword, PASSWORD_DEFAULT);
+
+                // update password with the new one
+                $updateSuccess = $this->db->update("users", ['email' => $email], ['password' => $hashedPassword]);
+
+                if ($updateSuccess) {
+                    // Mail config
+                    $mail = new PHPMailer(true);
+                    try {
+                        $this->ConfigMail($mail, $email);
+                        $mail->Subject = 'Nouveau mot de passe - Challenge Stack';
+                        $mail->Body = 'Votre nouveau mot de passe est : ' . $newPassword . ' Veuillez le changer';
+                        $mail->send();
+
+                        $_SESSION["success_message"] = "Un nouveau mot de passe a été envoyé à votre adresse email.";
+                        header("Location: /login");
+                        exit;
+                    } catch (Exception $e) {
+                        $_SESSION["error_message"] = "Impossible d'envoyer le mail.";
+                        header("Location: /forgot-password");
+                        exit;
+                    }
+                } else {
+                    $_SESSION["error_message"] = "Une erreur s'est produite lors de la mise à jour du mot de passe.";
+                    header("Location: /forgot-password");
+                    exit;
+                }
+            } else {
+                $_SESSION["error_message"] = "Email inexistant !";
+                header("Location: /forgot-password");
+                exit;
             }
         }
-        require(BASE_DIR . "/Views/Security/register_form.php");
+
+        require(BASE_DIR . "/Views/Security/forgot_password.php");
+    }
+
+    public function updatePassword(): void
+    {
+        session_start();
+
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $currentPassword = $_POST["currentPassword"] ?? '';
+            $newPassword = $_POST["newPassword"] ?? '';
+            $confirmPassword = $_POST["confirmPassword"] ?? '';
+            $email = $_SESSION["email"] ?? '';
+
+            if (empty($currentPassword) || empty($newPassword) || empty($confirmPassword) || empty($email)) {
+                $_SESSION["error_message"] = "Tous les champs sont requis.";
+                header("Location: /users");
+                exit;
+            }
+
+            if (strlen($newPassword) < 8) {
+                $_SESSION["error_message"] = "Le nouveau mot de passe doit comporter au moins 8 caractères.";
+                header("Location: /users");
+                exit;
+            }
+
+            if ($newPassword !== $confirmPassword) {
+                $_SESSION["error_message"] = "Les nouveaux mots de passe ne correspondent pas.";
+                header("Location: /users");
+                exit;
+            }
+
+            $user = $this->db->getOneBy("users", ['email' => $email]);
+
+            if ($user && password_verify($currentPassword, $user['password'])) {
+                $hashedPassword = password_hash($newPassword, PASSWORD_DEFAULT);
+                $updated = $this->db->update("users", ['email' => $email], ['password' => $hashedPassword]);
+
+                if ($updated) {
+                    $_SESSION["success_message"] = "Mot de passe mis à jour avec succès.";
+                } else {
+                    $_SESSION["error_message"] = "Une erreur est survenue lors de la mise à jour du mot de passe.";
+                }
+            } else {
+                $_SESSION["error_message"] = "Mot de passe actuel invalide.";
+            }
+
+            header("Location: /users");
+            exit;
+        }
     }
 
     public function activate(): void
     {
         session_start();
 
-        // Vérifie si le token est fourni dans l'URL
         if (!empty($_GET['token'])) {
             $token = $_GET['token'];
 
-            // Vérifie si le token existe dans la base de données
-            if ($this->User->isTokenValid($token)) {
+            $user = $this->db->getOneBy('users', ['activation_token' => $token]);
+
+            if ($user) {
                 // Active le compte utilisateur
-                if ($this->User->activateUser($token)) {
+                $updateSuccess = $this->db->update('users', ['activation_token' => $token], ['is_validated' => true, 'activation_token' => null]);
+
+                if ($updateSuccess) {
                     $_SESSION["success_message"] = "Votre compte a été activé avec succès. Vous pouvez maintenant vous connecter.";
                     header("Location: /login");
                 } else {
@@ -137,96 +272,6 @@ class Security
         }
     }
 
-
-    /**
-     * @throws RandomException
-     */
-    public function forgotPWD(): void {
-        session_start();
-
-        if ($_SERVER["REQUEST_METHOD"] == "POST") {
-            if (isset($_POST["email"])) {
-                $email = $_POST['email'];
-                if ($this->User->emailExists($email)) {
-                    // Genere un mot de passe aléatoire
-                    $newPassword = bin2hex(random_bytes(8));
-                    // MaJ du mot de passe
-                    $this->User->setPwd($email, $newPassword);
-                    // Instance PHPMailer
-                    $mail = new PHPMailer(true);
-
-                    try {
-                        // Paramètre du serveur
-                        $this->ConfigMail($mail, $email);
-                        $mail->Subject = 'Nouveau mot de passe - Challenge Stack';
-                        $mail->Body = 'Votre nouveau mot de passe est : ' . $newPassword;
-
-                        $mail->send();
-                        header("Location: /login");
-                    } catch (Exception $e) {
-                        $_SESSION["error_message"] = "Impossible d'envoyer le mail.";
-                    }
-                } else {
-                    $_SESSION["error_message"] = "Email inexistant !";
-                }
-            } else {
-                $_SESSION["error_message"] = "Veuillez fournir votre mail.";
-            }
-        }
-
-        require(BASE_DIR . "/Views/Security/forgot_password.php");
-    }
-
-    public function updatePassword(): void
-    {
-        session_start();
-        // Vérifie si le formulaire a été soumis
-        if ($_SERVER["REQUEST_METHOD"] == "POST") {
-            // if else raccourci
-            //                 |vérifie si bien envoyé           |supprime les espaces blanc      |else
-            $currentPassword = isset($_POST["currentPassword"]) ? trim($_POST["currentPassword"]) : '';
-            $newPassword = isset($_POST["newPassword"]) ? trim($_POST["newPassword"]) : '';
-            $confirmPassword = isset($_POST["confirmPassword"]) ? trim($_POST["confirmPassword"]) : '';
-            $email = $_SESSION["user_email"] ?? '';
-
-            // Validation des entrées
-            if (empty($currentPassword) || empty($newPassword) || empty($confirmPassword) || empty($email)) {
-                $_SESSION["error_message"] = "Tous les champs sont requis.";
-                header("Location: /user_management");
-                exit();
-            }
-            else {
-                // Vérifie la longueur du nouveau mot de passe
-                if (strlen($newPassword) < 8) {
-                    $_SESSION["error_message"] = "Le nouveau mot de passe doit comporter au moins 8 caractères.";
-                    header("Location: /user_management");
-                    exit();
-                }
-                else {
-                    // Vérifie si les nouveaux mots de passe correspondent
-                    if ($newPassword !== $confirmPassword) {
-                        $_SESSION["error_message"] = "Les nouveaux mots de passe ne correspondent pas.";
-                        header("Location: /user_management");
-                        exit();
-                    }
-                }
-            }
-
-            // Appel à la fonction du modèle pour mettre à jour le mot de passe
-            $updated = $this->User->setPwd($email, $newPassword, $currentPassword);
-            if ($updated) {
-                $_SESSION["success_message"] = "Mot de passe mis à jour avec succès.";
-            } else {
-                $_SESSION["error_message"] = "Mot de passe actuel invalide";
-            }
-        }
-
-        header("Location: /user_management");
-    }
-
-
-
-
     /**
      * @param PHPMailer $mail
      * @param mixed $email
@@ -238,7 +283,7 @@ class Security
         $mail->isSMTP();
         $mail->Host = 'smtp.gmail.com'; // Mettre SMTP server pour envoyer à travers
         $mail->SMTPAuth = true; // Activer SMTP authentication
-        $mail->Username = 'toma11chang@gmail.com'; // peut etre changer par le mail exprès pour le projet
+        $mail->Username = 'toma11chang@gmail.com'; // Peut-être changer par le mail exprès pour le projet
         $mail->Password = 'cxcp numx wtqr acvt'; // mot de passe de l'application (dans gmail)
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS; // Activer TLS encryption
         $mail->Port = 587; // TCP port pour connecter
@@ -249,5 +294,4 @@ class Security
         // Contenue
         $mail->isHTML(true);
     }
-
 }

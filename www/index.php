@@ -3,6 +3,7 @@
 namespace App;
 
 spl_autoload_register("App\myAutoloader");
+require("vendor/autoload.php");
 
 function myAutoloader($class): void
 {
@@ -57,5 +58,5 @@ if (!empty($listOfRoutes[$uri])) {
 } else {
     include "Controllers/Error.php";
     $object = new Controllers\Error();
-    $object->page404();
+    $object->error404();
 }
